@@ -33,6 +33,7 @@ var installCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		query := strings.Join(args, " ")
 		safe, _ := cmd.Flags().GetBool("safe")
+		force, _ := cmd.Flags().GetBool("force")
 
 		// 1. Busca local (pacman) + AUR RPC — instantâneo, sem LLM
 		fmt.Println("→ Buscando pacotes...")
@@ -71,13 +72,43 @@ var installCmd = &cobra.Command{
 			return nil
 		}
 
+		if force {
+			fmt.Printf("\n⚠  IGNORANDO AUDITORIA (--force) para %s\n", sel.Package)
+			if repo, ok := install.OfficialRepo(sel.Package); ok {
+				fmt.Printf("→ Instalando do repo oficial (%s)...\n", repo)
+				return install.InstallOfficial(sel.Package)
+			}
+			fmt.Println("→ Instalando via AUR helper...")
+			return install.InstallAUR(sel.Package)
+		}
+
 		// 2. Auditoria (só pra AUR — oficial já é PGP assinado)
 		fmt.Printf("\n→ Verificando %s...\n", sel.Package)
 		res, err := auditPackage(sel.Package)
 		if err != nil {
 			notify.Send("iai: pacote NÃO instalado",
 				fmt.Sprintf("%s: %s", sel.Package, err.Error()))
-			return err
+			var parts []string
+			parts = append(parts, err.Error())
+			if res != nil {
+				if len(res.Threats) > 0 {
+					parts = append(parts, "Ameaças determinísticas:")
+					for _, t := range res.Threats {
+						parts = append(parts, fmt.Sprintf("  [%s] %s: %s", strings.ToUpper(t.Severity), t.Rule, t.Detail))
+					}
+				}
+				if len(res.LLMReasons) > 0 {
+					parts = append(parts, "Motivos LLM:")
+					for _, r := range res.LLMReasons {
+						parts = append(parts, "  - "+r)
+					}
+				}
+			}
+			msg := fmt.Sprintf("%s não é seguro sem dúvidas:\n%s", sel.Package, strings.Join(parts, "\n"))
+			notify.Send("iai: pacote NÃO instalado", strings.ReplaceAll(msg, "\n", " | "))
+			fmt.Printf("\n%s\n", strings.Join(parts, "\n"))
+			fmt.Println("\nPara instalar mesmo assim: iai install --force <termo>")
+			return fmt.Errorf("bloqueado pela auditoria")
 		}
 
 		if !res.Safe {
@@ -97,7 +128,9 @@ var installCmd = &cobra.Command{
 			}
 			msg := fmt.Sprintf("%s não é seguro sem dúvidas:\n%s", sel.Package, strings.Join(parts, "\n"))
 			notify.Send("iai: pacote NÃO instalado", strings.ReplaceAll(msg, "\n", " | "))
-			return fmt.Errorf("%s", msg)
+			fmt.Printf("\n%s\n", strings.Join(parts, "\n"))
+			fmt.Println("\nPara instalar mesmo assim: iai install --force <termo>")
+			return fmt.Errorf("bloqueado pela auditoria")
 		}
 
 		fmt.Println("\n→ Todas as verificações passaram, instalando...")
@@ -250,5 +283,6 @@ func extractJSON(s string) string {
 
 func init() {
 	installCmd.Flags().BoolP("safe", "s", false, "com 1 resultado, pula a escolha e segue direto pra auditoria")
+	installCmd.Flags().BoolP("force", "f", false, "ignora auditoria e instala mesmo assim (CUIDADO)")
 	rootCmd.AddCommand(installCmd)
 }
